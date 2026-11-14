@@ -176,7 +176,7 @@ class ProveedorZernio(ProveedorWhatsApp):
 
     # ── Deteccion de control humano ──────────────────────────────────────
 
-    async def detectar_control_humano(self, conversation_id: str) -> bool:
+    async def detectar_control_humano(self, conversation_id: str, account_id: str = "") -> bool:
         """
         Consulta los mensajes recientes de la conversacion y detecta si el ultimo
         mensaje SALIENTE fue enviado desde la app de WhatsApp Business (sentVia: null)
@@ -184,21 +184,30 @@ class ProveedorZernio(ProveedorWhatsApp):
 
         Retorna True si Israel respondio desde su celular → la IA debe pausarse.
         Retorna False si Camila fue la ultima en responder, o si no hay mensajes salientes,
-        o si la consulta falla (en ese caso, es mejor no pausar que bloquear al agente).
+        o si la consulta falla (fail-open: mejor responder de mas que dejar al cliente mudo).
 
-        Por que sentVia:
-          "api"  → Camila respondio via la API de Zernio (normal)
-          null   → mensaje enviado desde la app nativa de WhatsApp Business
-                   (Israel respondio desde su celular)
+        sentVia vocabulario:
+          "api"  → Camila respondio via la API de Zernio
+          null   → mensaje enviado desde la app nativa de WhatsApp Business (Israel)
+          "human"→ operador respondio desde el inbox web de Zernio
         """
         if not self.api_key or not conversation_id:
+            return False
+
+        # accountId es REQUERIDO por la API de Zernio — sin el retorna 400
+        cuenta = account_id or self.account_id
+        if not cuenta:
+            logger.warning(
+                f"detectar_control_humano: sin account_id para conv {conversation_id}, "
+                f"se omite la verificacion"
+            )
             return False
 
         try:
             async with httpx.AsyncClient(timeout=10.0) as cliente:
                 r = await cliente.get(
                     f"{self.base_url}/inbox/conversations/{conversation_id}/messages",
-                    params={"sortOrder": "desc", "limit": "10"},
+                    params={"accountId": cuenta, "sortOrder": "desc", "limit": "10"},
                     headers={"Authorization": f"Bearer {self.api_key}"},
                 )
         except httpx.HTTPError as e:
@@ -208,7 +217,7 @@ class ProveedorZernio(ProveedorWhatsApp):
         if r.status_code != 200:
             logger.warning(
                 f"Zernio respondio {r.status_code} al consultar historial "
-                f"de conv {conversation_id}: {r.text[:200]}"
+                f"de conv {conversation_id}: {r.text[:300]}"
             )
             return False
 
@@ -217,17 +226,22 @@ class ProveedorZernio(ProveedorWhatsApp):
         except ValueError:
             return False
 
-        # Zernio puede traer los mensajes en "data" o "messages"
-        mensajes = body.get("data") or body.get("messages") or []
+        # El endpoint devuelve los mensajes en body["messages"] (confirmado por spec)
+        mensajes = body.get("messages") or []
+        logger.debug(
+            f"Historial conv {conversation_id}: {len(mensajes)} mensajes, "
+            f"sortOrderApplied={body.get('sortOrderApplied')}"
+        )
 
         for msg in mensajes:
             if msg.get("direction") != "outgoing":
                 continue
 
             sent_via = msg.get("sentVia")
+            logger.debug(f"Ultimo saliente en conv {conversation_id}: sentVia={sent_via!r}")
 
             if sent_via is None:
-                # Mensaje saliente enviado desde la app de WhatsApp Business de Israel
+                # App nativa de WhatsApp Business (Israel respondio desde su celular)
                 logger.info(
                     f"Control humano detectado (sentVia=null) en conv {conversation_id}"
                 )
@@ -237,8 +251,15 @@ class ProveedorZernio(ProveedorWhatsApp):
                 # Camila fue la ultima en responder — continuar normalmente
                 return False
 
-            # "broadcast", "sequence", "workflow", etc. son envios automatizados de
-            # Zernio, no de un humano. Los saltamos y seguimos buscando.
+            if sent_via == "human":
+                # Operador desde el inbox web de Zernio — tambien es humano
+                logger.info(
+                    f"Control humano detectado (sentVia=human) en conv {conversation_id}"
+                )
+                return True
+
+            # "broadcast", "sequence", "workflow", etc. son automatizaciones de Zernio,
+            # no un humano. Seguimos buscando el siguiente mensaje saliente.
 
         return False
 

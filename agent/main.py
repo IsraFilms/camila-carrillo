@@ -291,8 +291,9 @@ async def procesar_mensaje(msg: MensajeEntrante):
             # sentVia del ultimo mensaje saliente. Si es null = app nativa = humano al mando.
             # Esto corre en background (ya respondimos 200), asi que el tiempo extra no
             # afecta el SLA del webhook.
+            account_id = msg.contexto.get("account_id", "")
             if conversation_id and hasattr(proveedor, "detectar_control_humano"):
-                if await proveedor.detectar_control_humano(conversation_id):
+                if await proveedor.detectar_control_humano(conversation_id, account_id):
                     await pausar_conversacion(f"conv:{conversation_id}", horas=2)
                     logger.info(
                         f"IA pausada automaticamente para {msg.telefono} "
