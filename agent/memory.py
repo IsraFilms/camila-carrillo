@@ -231,6 +231,17 @@ async def esta_pausada(telefono: str, conversation_id: str = "") -> bool:
     return False
 
 
+async def limpiar_todas_las_pausas() -> int:
+    """Elimina todas las pausas activas. Retorna cuantas se borraron."""
+    async with async_session() as session:
+        resultado = await session.execute(delete(ConversacionPausada))
+        await session.commit()
+    n = resultado.rowcount
+    if n:
+        logger.info(f"Se eliminaron {n} pausas activas")
+    return n
+
+
 async def reanudar_conversacion(clave: str):
     """
     Reactiva la IA para una clave inmediatamente.

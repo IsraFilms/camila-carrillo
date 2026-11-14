@@ -23,6 +23,7 @@ from agent.memory import (
     inicializar_db,
     liberar_evento,
     limpiar_eventos_viejos,
+    limpiar_todas_las_pausas,
     marcar_evento_procesado,
     obtener_historial,
     pausar_conversacion,
@@ -151,6 +152,9 @@ button:active{transform:scale(.96)}
 <div class="fila">
   <button class="reactivar" onclick="reactivar()">▶ Reactivar IA</button>
 </div>
+<div class="fila" style="margin-top:8px">
+  <button class="reactivar" style="background:#0a4a7a" onclick="reactivarTodo()">▶▶ Reactivar TODAS</button>
+</div>
 
 <div id="res"></div>
 
@@ -176,6 +180,13 @@ async function reactivar(){
     r.ok?mostrar('✓ IA reactivada para<br><b>'+tel()+'</b>',true):mostrar('Error: '+JSON.stringify(d),false);
   }catch(e){mostrar('Error de red — ¿está el servidor activo?',false)}
 }
+async function reactivarTodo(){
+  try{
+    const r=await fetch('/admin/reanudar-todo',{method:'POST'});
+    const d=await r.json();
+    r.ok?mostrar('✓ IA reactivada para todos los clientes<br>('+d.pausas_eliminadas+' pausas eliminadas)',true):mostrar('Error: '+JSON.stringify(d),false);
+  }catch(e){mostrar('Error de red — ¿está el servidor activo?',false)}
+}
 </script>
 </body>
 </html>""")
@@ -193,6 +204,13 @@ async def admin_reanudar(telefono: str):
     """Reactiva la IA para un numero inmediatamente."""
     await reanudar_conversacion(f"phone:{telefono}")
     return {"status": "ok", "telefono": telefono, "estado": "reactivada"}
+
+
+@app.post("/admin/reanudar-todo")
+async def admin_reanudar_todo():
+    """Elimina TODAS las pausas activas. Reactiva la IA para todos los clientes."""
+    eliminadas = await limpiar_todas_las_pausas()
+    return {"status": "ok", "pausas_eliminadas": eliminadas}
 
 
 @app.get("/webhook")
