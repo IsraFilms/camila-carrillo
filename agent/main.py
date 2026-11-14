@@ -50,6 +50,29 @@ logger.setLevel(logging.DEBUG if ENVIRONMENT == "development" else logging.INFO)
 
 PORT = int(os.getenv("PORT", "8000"))
 
+# ── Notificaciones de lead caliente ──────────────────────────────────────────
+# Cuando Camila detecta que un prospecto quiere avanzar (Paso 7 del flujo de ventas),
+# manda un WhatsApp a Israel con el resumen del lead.
+#
+# Requiere un setup de una vez: Israel manda cualquier mensaje desde su celular personal
+# al numero de WhatsApp del negocio. El conversation_id queda en los logs de Railway.
+# Ese ID se agrega como ISRAEL_CONVERSATION_ID en las variables de entorno de Railway.
+ISRAEL_CONVERSATION_ID = os.getenv("ISRAEL_CONVERSATION_ID", "")
+ISRAEL_ACCOUNT_ID = os.getenv("ISRAEL_ACCOUNT_ID", "")
+
+# Frases que Camila dice en el Paso 7 (lead listo para cerrar).
+# Se detectan en la respuesta para disparar la notificacion.
+FRASES_ESCALACION = [
+    "pasar tu contacto a israel",
+    "coordinarlo con israel",
+    "coordinar los detalles y agendar",
+    "pasar con israel",
+]
+
+# Evitar notificar el mismo numero dos veces en el mismo deploy.
+# Si el agente se reinicia (nuevo deploy), puede notificar de nuevo — es aceptable.
+_leads_notificados: set[str] = set()
+
 # Un candado por numero de telefono. En WhatsApp es normal que alguien mande "hola" y
 # medio segundo despues la pregunta de verdad: sin esto los dos mensajes se procesarian
 # en paralelo, los dos leerian el mismo historial y las escrituras quedarian intercaladas.
@@ -310,6 +333,61 @@ async def webhook_handler(request: Request, tareas: BackgroundTasks):
     return {"status": "ok", "encolados": encolados}
 
 
+async def notificar_lead_caliente(telefono: str, historial: list[dict], mensaje_actual: str):
+    """
+    Manda un WhatsApp a Israel cuando Camila detecta un lead listo para cerrar.
+
+    Construye un resumen con los ultimos mensajes de la conversacion para que Israel
+    tenga contexto antes de llamar al prospecto.
+    """
+    if not ISRAEL_CONVERSATION_ID:
+        logger.warning(
+            "ISRAEL_CONVERSATION_ID no esta configurado — no se puede notificar el lead. "
+            "Ver instrucciones de setup en el README o en el comentario de esta variable."
+        )
+        return
+
+    if telefono in _leads_notificados:
+        logger.info(f"Lead {telefono} ya fue notificado en este deploy, se omite")
+        return
+
+    # Ultimos 4 intercambios (8 mensajes) para el resumen
+    ultimos = historial[-8:] if len(historial) >= 8 else historial
+    lineas = []
+    for m in ultimos:
+        rol = "Cliente" if m["role"] == "user" else "Camila"
+        texto = m["content"][:120].replace("\n", " ")
+        lineas.append(f"{rol}: {texto}")
+    # Agregar el mensaje actual que disparo el Paso 7
+    lineas.append(f"Cliente: {mensaje_actual[:120]}")
+    resumen = "\n".join(lineas)
+
+    texto_notificacion = (
+        f"🔥 *Lead caliente*\n\n"
+        f"📱 +{telefono}\n"
+        f"💬 Quiere avanzar — acaba de pedir propuesta o reunión\n\n"
+        f"*Últimos mensajes:*\n{resumen}\n\n"
+        f"Respóndele pronto 👆"
+    )
+
+    account_id = ISRAEL_ACCOUNT_ID or os.getenv("ZERNIO_ACCOUNT_ID", "")
+    contexto_israel = {
+        "conversation_id": ISRAEL_CONVERSATION_ID,
+        "account_id": account_id,
+        # Sin evento_id: no queremos deduplicar estas notificaciones entre deploys
+    }
+
+    if proveedor is None:
+        return
+
+    enviado = await proveedor.enviar_mensaje("", texto_notificacion, contexto_israel)
+    if enviado:
+        _leads_notificados.add(telefono)
+        logger.info(f"Notificacion de lead caliente enviada a Israel: {telefono}")
+    else:
+        logger.error(f"No se pudo enviar notificacion de lead para {telefono}")
+
+
 async def procesar_mensaje(msg: MensajeEntrante):
     """
     Genera la respuesta y la manda de vuelta. Corre fuera del ciclo del webhook.
@@ -377,6 +455,14 @@ async def procesar_mensaje(msg: MensajeEntrante):
             if es_respuesta_real:
                 await guardar_mensaje(msg.telefono, "user", msg.texto)
                 await guardar_mensaje(msg.telefono, "assistant", respuesta)
+
+                # Detectar si Camila acaba de llegar al Paso 7 del flujo (lead caliente).
+                # Se revisa la respuesta generada: si contiene alguna de las frases de
+                # escalacion, significa que el prospecto quiere avanzar y hay que avisar
+                # a Israel con un resumen de la conversacion.
+                respuesta_lower = respuesta.lower()
+                if any(frase in respuesta_lower for frase in FRASES_ESCALACION):
+                    await notificar_lead_caliente(msg.telefono, historial, msg.texto)
 
             logger.info(f"Respuesta enviada a {msg.telefono}: {respuesta}")
 
