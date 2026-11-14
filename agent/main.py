@@ -14,7 +14,7 @@ from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse
 
 from agent.brain import generar_respuesta, obtener_mensaje_error
 from agent.memory import (
@@ -105,6 +105,80 @@ async def health_check():
         "proveedor": proveedor.__class__.__name__ if proveedor else None,
         "conexion": estado_proveedor,
     }
+
+
+@app.get("/panel", response_class=HTMLResponse)
+async def panel_control():
+    """Panel web para pausar/reactivar Camila desde el celular."""
+    return HTMLResponse("""<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Camila — Control</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0f0f0f;color:#fff;min-height:100vh;padding:28px 18px}
+h1{font-size:22px;font-weight:700;margin-bottom:4px}
+.sub{color:#666;font-size:14px;margin-bottom:28px}
+label{display:block;font-size:13px;color:#999;margin-bottom:8px}
+input{width:100%;padding:15px 16px;border-radius:14px;border:1px solid #2a2a2a;background:#181818;color:#fff;font-size:17px;margin-bottom:18px;outline:none;-webkit-appearance:none}
+input:focus{border-color:#444}
+.fila{display:grid;grid-template-columns:1fr 1fr;gap:11px;margin-bottom:11px}
+button{padding:16px;border-radius:14px;border:none;font-size:15px;font-weight:700;cursor:pointer;width:100%;transition:transform .1s}
+button:active{transform:scale(.96)}
+.pausa{background:#c0392b;color:#fff}
+.pausa.larga{background:#9b2335}
+.reactivar{background:#1a7a45;color:#fff;grid-column:1/-1}
+#res{margin-top:22px;padding:15px 17px;border-radius:14px;font-size:14px;line-height:1.5;display:none}
+.ok{background:#0d2117;color:#55d98a;border:1px solid #1a5c37}
+.err{background:#200d0d;color:#ff7070;border:1px solid #5c1a1a}
+.hint{color:#555;font-size:12px;margin-top:-12px;margin-bottom:18px}
+</style>
+</head>
+<body>
+<h1>Camila — Control</h1>
+<p class="sub">Pausa o reactiva la IA para un cliente</p>
+
+<label>Teléfono del cliente</label>
+<input type="tel" id="tel" placeholder="56912345678" inputmode="numeric">
+<p class="hint">Sin +, con código de país. Ej: 56912345678</p>
+
+<div class="fila">
+  <button class="pausa" onclick="pausar(2)">Pausar 2h</button>
+  <button class="pausa larga" onclick="pausar(8)">Pausar 8h</button>
+</div>
+<div class="fila">
+  <button class="reactivar" onclick="reactivar()">▶ Reactivar IA</button>
+</div>
+
+<div id="res"></div>
+
+<script>
+function tel(){return document.getElementById('tel').value.trim()}
+function mostrar(msg,ok){
+  const el=document.getElementById('res');
+  el.innerHTML=msg;el.className=ok?'ok':'err';el.style.display='block';
+}
+async function pausar(h){
+  if(!tel()){mostrar('Ingresa el número del cliente','err');return}
+  try{
+    const r=await fetch('/admin/pausar/'+tel()+'?horas='+h,{method:'POST'});
+    const d=await r.json();
+    r.ok?mostrar('✓ IA pausada '+h+'h para<br><b>'+tel()+'</b>',true):mostrar('Error: '+JSON.stringify(d),false);
+  }catch(e){mostrar('Error de red — ¿está el servidor activo?',false)}
+}
+async function reactivar(){
+  if(!tel()){mostrar('Ingresa el número del cliente',false);return}
+  try{
+    const r=await fetch('/admin/reanudar/'+tel(),{method:'POST'});
+    const d=await r.json();
+    r.ok?mostrar('✓ IA reactivada para<br><b>'+tel()+'</b>',true):mostrar('Error: '+JSON.stringify(d),false);
+  }catch(e){mostrar('Error de red — ¿está el servidor activo?',false)}
+}
+</script>
+</body>
+</html>""")
 
 
 @app.post("/admin/pausar/{telefono}")
