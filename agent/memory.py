@@ -84,11 +84,17 @@ class ConversacionPausada(Base):
 
     Se activa automaticamente cuando el agente detecta un mensaje saliente (Israel
     respondio desde el inbox de Zernio) y se desactiva al vencer el tiempo.
+
+    clave puede ser:
+      "phone:<telefono>"  — pausa manual via admin endpoint
+      "conv:<conv_id>"    — pausa automatica al detectar mensaje saliente de Zernio
+
+    Se usa una tabla nueva (v2) para no chocar con el esquema anterior.
     """
 
-    __tablename__ = "conversaciones_pausadas"
+    __tablename__ = "conversaciones_pausadas_v2"
 
-    telefono: Mapped[str] = mapped_column(String(50), primary_key=True)
+    clave: Mapped[str] = mapped_column(String(250), primary_key=True)
     pausada_hasta: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
@@ -185,37 +191,55 @@ async def limpiar_historial(telefono: str):
         await session.commit()
 
 
-async def pausar_conversacion(telefono: str, horas: int = 2):
-    """Pausa las respuestas automaticas para un numero por N horas."""
+async def pausar_conversacion(clave: str, horas: int = 2):
+    """
+    Pausa las respuestas automaticas para una clave por N horas.
+
+    clave debe ser "phone:<telefono>" o "conv:<conversation_id>".
+    """
     hasta = ahora() + timedelta(hours=horas)
     async with async_session() as session:
-        pausa = await session.get(ConversacionPausada, telefono)
+        pausa = await session.get(ConversacionPausada, clave)
         if pausa:
             pausa.pausada_hasta = hasta
         else:
-            session.add(ConversacionPausada(telefono=telefono, pausada_hasta=hasta))
+            session.add(ConversacionPausada(clave=clave, pausada_hasta=hasta))
         await session.commit()
-    logger.info(f"IA pausada para {telefono} por {horas}h (hasta las {hasta.strftime('%H:%M')} UTC)")
+    logger.info(f"IA pausada para {clave} por {horas}h (hasta las {hasta.strftime('%H:%M')} UTC)")
 
 
-async def esta_pausada(telefono: str) -> bool:
-    """True si la IA esta pausada para este numero."""
+async def esta_pausada(telefono: str, conversation_id: str = "") -> bool:
+    """
+    True si la IA esta pausada para este numero o conversacion.
+
+    Revisa dos claves: "phone:<telefono>" y "conv:<conversation_id>" (si se pasa).
+    """
+    claves = [f"phone:{telefono}"]
+    if conversation_id:
+        claves.append(f"conv:{conversation_id}")
+
     async with async_session() as session:
-        pausa = await session.get(ConversacionPausada, telefono)
-        if not pausa:
-            return False
-        if ahora() > pausa.pausada_hasta:
-            await session.delete(pausa)
-            await session.commit()
-            return False
-        return True
+        for clave in claves:
+            pausa = await session.get(ConversacionPausada, clave)
+            if not pausa:
+                continue
+            if ahora() > pausa.pausada_hasta:
+                await session.delete(pausa)
+                await session.commit()
+                continue
+            return True
+    return False
 
 
-async def reanudar_conversacion(telefono: str):
-    """Reactiva la IA para un numero inmediatamente."""
+async def reanudar_conversacion(clave: str):
+    """
+    Reactiva la IA para una clave inmediatamente.
+
+    clave puede ser "phone:<telefono>" o "conv:<conversation_id>".
+    """
     async with async_session() as session:
-        pausa = await session.get(ConversacionPausada, telefono)
+        pausa = await session.get(ConversacionPausada, clave)
         if pausa:
             await session.delete(pausa)
             await session.commit()
-    logger.info(f"IA reactivada para {telefono}")
+    logger.info(f"IA reactivada para {clave}")

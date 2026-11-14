@@ -110,14 +110,14 @@ async def health_check():
 @app.post("/admin/pausar/{telefono}")
 async def admin_pausar(telefono: str, horas: int = 2):
     """Pausa la IA para un numero. Util cuando un humano toma el control manualmente."""
-    await pausar_conversacion(telefono, horas=horas)
+    await pausar_conversacion(f"phone:{telefono}", horas=horas)
     return {"status": "ok", "telefono": telefono, "pausado_por_horas": horas}
 
 
 @app.post("/admin/reanudar/{telefono}")
 async def admin_reanudar(telefono: str):
     """Reactiva la IA para un numero inmediatamente."""
-    await reanudar_conversacion(telefono)
+    await reanudar_conversacion(f"phone:{telefono}")
     return {"status": "ok", "telefono": telefono, "estado": "reactivada"}
 
 
@@ -167,17 +167,24 @@ async def webhook_handler(request: Request, tareas: BackgroundTasks):
     encolados = 0
     for msg in mensajes:
         if msg.es_propio:
-            # Israel respondio manualmente desde el inbox de Zernio: pausar la IA 2 horas
-            if msg.telefono:
-                await pausar_conversacion(msg.telefono, horas=2)
+            # Israel respondio manualmente desde el inbox de Zernio: pausar la IA 2 horas.
+            # Usamos conversation_id como clave porque en mensajes salientes el "sender"
+            # es el negocio, no el cliente — el telefono aqui seria el numero del negocio.
+            conversation_id = msg.contexto.get("conversation_id", "")
+            if conversation_id:
+                await pausar_conversacion(f"conv:{conversation_id}", horas=2)
+            elif msg.telefono:
+                await pausar_conversacion(f"phone:{msg.telefono}", horas=2)
             continue
 
         if not msg.texto.strip():
             continue
 
-        # Si un humano tomo el control, la IA no interrumpe
-        if await esta_pausada(msg.telefono):
-            logger.info(f"IA pausada para {msg.telefono}: mensaje ignorado")
+        # Si un humano tomo el control, la IA no interrumpe.
+        # Revisamos por telefono (pausa manual) Y por conversation_id (pausa automatica).
+        conversation_id = msg.contexto.get("conversation_id", "")
+        if await esta_pausada(msg.telefono, conversation_id):
+            logger.info(f"IA pausada para {msg.telefono} (conv: {conversation_id}): mensaje ignorado")
             continue
 
         # La entrega es "al menos una vez": el mismo evento puede llegar dos veces
