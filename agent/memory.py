@@ -78,6 +78,26 @@ class EventoProcesado(Base):
     creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora, index=True)
 
 
+class Seguimiento(Base):
+    """
+    Rastrea conversaciones activas para el seguimiento automatico.
+
+    Cuando un cliente escribe y Camila responde, se registra su actividad.
+    Si no vuelve a escribir en X horas, Camila le manda un recordatorio.
+    Maximo 2 seguimientos por conversacion, dentro de la ventana de 24 horas.
+    """
+
+    __tablename__ = "seguimientos"
+
+    telefono: Mapped[str] = mapped_column(String(50), primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(String(200), default="")
+    account_id: Mapped[str] = mapped_column(String(200), default="")
+    ultimo_mensaje_cliente: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
+    seguimientos_enviados: Mapped[int] = mapped_column(Integer, default=0)
+    ultimo_seguimiento: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    activo: Mapped[bool] = mapped_column(default=True)
+
+
 class ConversacionPausada(Base):
     """
     Conversaciones donde la IA esta pausada porque un humano tomo el control.
@@ -240,6 +260,91 @@ async def limpiar_todas_las_pausas() -> int:
     if n:
         logger.info(f"Se eliminaron {n} pausas activas")
     return n
+
+
+async def registrar_actividad_cliente(telefono: str, conversation_id: str, account_id: str):
+    """
+    Registra o actualiza la actividad de un cliente.
+
+    Se llama cuando el cliente escribe y Camila respondio correctamente.
+    Si ya existe un registro, resetea el contador (el cliente respondio — empezar de nuevo).
+    """
+    async with async_session() as session:
+        seg = await session.get(Seguimiento, telefono)
+        if seg:
+            seg.ultimo_mensaje_cliente = ahora()
+            seg.seguimientos_enviados = 0
+            seg.ultimo_seguimiento = None
+            seg.activo = True
+            seg.conversation_id = conversation_id
+            seg.account_id = account_id
+        else:
+            session.add(Seguimiento(
+                telefono=telefono,
+                conversation_id=conversation_id,
+                account_id=account_id,
+                ultimo_mensaje_cliente=ahora(),
+                seguimientos_enviados=0,
+                activo=True,
+            ))
+        await session.commit()
+
+
+async def obtener_seguimientos_pendientes(horas_1: int = 3, horas_2: int = 6) -> list[dict]:
+    """
+    Retorna las conversaciones que necesitan seguimiento ahora.
+
+    - Primer seguimiento: >= horas_1 desde el ultimo mensaje del cliente, sin enviar ninguno
+    - Segundo seguimiento: >= horas_2 desde el primer seguimiento enviado
+    - En ambos casos: dentro de la ventana de 24 horas (texto libre de WhatsApp)
+    """
+    ahora_dt = ahora()
+    limite_24h = ahora_dt - timedelta(hours=24)
+
+    async with async_session() as session:
+        resultado = await session.execute(
+            select(Seguimiento).where(Seguimiento.activo == True)  # noqa: E712
+        )
+        todos = list(resultado.scalars().all())
+
+    pendientes = []
+    for seg in todos:
+        # Fuera de la ventana de 24 horas: no se puede mandar texto libre
+        if seg.ultimo_mensaje_cliente < limite_24h:
+            continue
+
+        tiempo_sin_respuesta = ahora_dt - seg.ultimo_mensaje_cliente
+
+        if seg.seguimientos_enviados == 0 and tiempo_sin_respuesta >= timedelta(hours=horas_1):
+            pendientes.append({
+                "telefono": seg.telefono,
+                "conversation_id": seg.conversation_id,
+                "account_id": seg.account_id,
+                "numero": 1,
+            })
+        elif seg.seguimientos_enviados == 1 and seg.ultimo_seguimiento:
+            tiempo_desde_seguimiento = ahora_dt - seg.ultimo_seguimiento
+            if tiempo_desde_seguimiento >= timedelta(hours=horas_2):
+                pendientes.append({
+                    "telefono": seg.telefono,
+                    "conversation_id": seg.conversation_id,
+                    "account_id": seg.account_id,
+                    "numero": 2,
+                })
+
+    return pendientes
+
+
+async def marcar_seguimiento_enviado(telefono: str):
+    """Incrementa el contador y registra la hora. Si llego al maximo, desactiva."""
+    async with async_session() as session:
+        seg = await session.get(Seguimiento, telefono)
+        if seg:
+            seg.seguimientos_enviados += 1
+            seg.ultimo_seguimiento = ahora()
+            if seg.seguimientos_enviados >= 2:
+                seg.activo = False
+            await session.commit()
 
 
 async def reanudar_conversacion(clave: str):

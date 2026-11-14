@@ -26,8 +26,11 @@ from agent.memory import (
     limpiar_eventos_viejos,
     limpiar_todas_las_pausas,
     marcar_evento_procesado,
+    marcar_seguimiento_enviado,
     obtener_historial,
+    obtener_seguimientos_pendientes,
     pausar_conversacion,
+    registrar_actividad_cliente,
     reanudar_conversacion,
 )
 from agent.providers import obtener_proveedor
@@ -92,6 +95,22 @@ def _es_lead_caliente(respuesta: str) -> bool:
         return True
     return False
 
+# ── Seguimiento automatico ───────────────────────────────────────────────────
+# Si un prospecto deja de responder, Camila le escribe de nuevo.
+# Primer seguimiento a las SEGUIMIENTO_HORAS_1 horas, segundo a las SEGUIMIENTO_HORAS_2.
+# Solo dentro de la ventana de 24 horas de WhatsApp (texto libre, sin plantillas).
+SEGUIMIENTO_HORAS_1 = int(os.getenv("SEGUIMIENTO_HORAS_1") or "3")
+SEGUIMIENTO_HORAS_2 = int(os.getenv("SEGUIMIENTO_HORAS_2") or "6")
+
+MENSAJE_SEGUIMIENTO_1 = (
+    "Hola! Solo quería saber si pudiste revisar lo que conversamos 😊 "
+    "Estoy por acá si tienes alguna duda o quieres continuar."
+)
+MENSAJE_SEGUIMIENTO_2 = (
+    "Hola de nuevo! No quiero molestar, pero quería dejar abierta la invitación "
+    "por si en algún momento quieres retomar. Seguimos disponibles 🎬"
+)
+
 # Evitar notificar el mismo numero dos veces en el mismo deploy.
 # Si el agente se reinicia (nuevo deploy), puede notificar de nuevo — es aceptable.
 _leads_notificados: set[str] = set()
@@ -140,6 +159,9 @@ async def lifespan(app: FastAPI):
         logger.info(f"Conexion con el proveedor: {'OK' if ok else 'ERROR'} — {detalle}")
     else:
         logger.error(f"Proveedor de WhatsApp NO configurado: {error_configuracion}")
+
+    asyncio.create_task(tarea_seguimientos())
+    logger.info(f"Seguimiento automatico: {SEGUIMIENTO_HORAS_1}h primera vez, {SEGUIMIENTO_HORAS_2}h segunda")
 
     yield
 
@@ -356,6 +378,37 @@ async def webhook_handler(request: Request, tareas: BackgroundTasks):
     return {"status": "ok", "encolados": encolados}
 
 
+async def tarea_seguimientos():
+    """
+    Revisa cada 30 minutos si hay prospectos sin respuesta que necesiten seguimiento.
+    Corre en segundo plano desde que arranca el servidor.
+    """
+    while True:
+        await asyncio.sleep(1800)  # 30 minutos
+        try:
+            if proveedor is None:
+                continue
+            pendientes = await obtener_seguimientos_pendientes(SEGUIMIENTO_HORAS_1, SEGUIMIENTO_HORAS_2)
+            for seg in pendientes:
+                # No interrumpir si un humano tomo el control
+                if await esta_pausada(seg["telefono"], seg["conversation_id"]):
+                    continue
+
+                mensaje = MENSAJE_SEGUIMIENTO_1 if seg["numero"] == 1 else MENSAJE_SEGUIMIENTO_2
+                contexto = {
+                    "conversation_id": seg["conversation_id"],
+                    "account_id": seg["account_id"],
+                }
+                enviado = await proveedor.enviar_mensaje(seg["telefono"], mensaje, contexto)
+                if enviado:
+                    await marcar_seguimiento_enviado(seg["telefono"])
+                    logger.info(f"Seguimiento #{seg['numero']} enviado a {seg['telefono']}")
+                else:
+                    logger.error(f"No se pudo enviar seguimiento #{seg['numero']} a {seg['telefono']}")
+        except Exception as e:  # noqa: BLE001
+            logger.exception(f"Error en tarea_seguimientos: {e}")
+
+
 async def notificar_lead_caliente(telefono: str, historial: list[dict], mensaje_actual: str):
     """
     Manda un WhatsApp a Israel cuando Camila detecta un lead listo para cerrar.
@@ -478,6 +531,10 @@ async def procesar_mensaje(msg: MensajeEntrante):
             if es_respuesta_real:
                 await guardar_mensaje(msg.telefono, "user", msg.texto)
                 await guardar_mensaje(msg.telefono, "assistant", respuesta)
+                # Registrar actividad para el seguimiento automatico.
+                # Si el prospecto no vuelve a escribir en SEGUIMIENTO_HORAS_1 horas,
+                # Camila le manda un recordatorio.
+                await registrar_actividad_cliente(msg.telefono, conversation_id, account_id)
 
                 # Detectar si Camila acaba de llegar al Paso 7 del flujo (lead caliente).
                 if _es_lead_caliente(respuesta):
