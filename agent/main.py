@@ -294,7 +294,8 @@ async def procesar_mensaje(msg: MensajeEntrante):
             account_id = msg.contexto.get("account_id", "")
             if conversation_id and hasattr(proveedor, "detectar_control_humano"):
                 if await proveedor.detectar_control_humano(conversation_id, account_id):
-                    await pausar_conversacion(f"conv:{conversation_id}", horas=2)
+                    # Usamos phone: (no conv:) para que /admin/reanudar y el /panel funcionen
+                    await pausar_conversacion(f"phone:{msg.telefono}", horas=2)
                     logger.info(
                         f"IA pausada automaticamente para {msg.telefono} "
                         f"(conv: {conversation_id}): Israel respondio desde la app de WA"
