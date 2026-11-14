@@ -78,6 +78,20 @@ class EventoProcesado(Base):
     creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora, index=True)
 
 
+class ConversacionPausada(Base):
+    """
+    Conversaciones donde la IA esta pausada porque un humano tomo el control.
+
+    Se activa automaticamente cuando el agente detecta un mensaje saliente (Israel
+    respondio desde el inbox de Zernio) y se desactiva al vencer el tiempo.
+    """
+
+    __tablename__ = "conversaciones_pausadas"
+
+    telefono: Mapped[str] = mapped_column(String(50), primary_key=True)
+    pausada_hasta: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 async def inicializar_db():
     """Crea las tablas si no existen."""
     async with engine.begin() as conn:
@@ -169,3 +183,39 @@ async def limpiar_historial(telefono: str):
     async with async_session() as session:
         await session.execute(delete(Mensaje).where(Mensaje.telefono == telefono))
         await session.commit()
+
+
+async def pausar_conversacion(telefono: str, horas: int = 2):
+    """Pausa las respuestas automaticas para un numero por N horas."""
+    hasta = ahora() + timedelta(hours=horas)
+    async with async_session() as session:
+        pausa = await session.get(ConversacionPausada, telefono)
+        if pausa:
+            pausa.pausada_hasta = hasta
+        else:
+            session.add(ConversacionPausada(telefono=telefono, pausada_hasta=hasta))
+        await session.commit()
+    logger.info(f"IA pausada para {telefono} por {horas}h (hasta las {hasta.strftime('%H:%M')} UTC)")
+
+
+async def esta_pausada(telefono: str) -> bool:
+    """True si la IA esta pausada para este numero."""
+    async with async_session() as session:
+        pausa = await session.get(ConversacionPausada, telefono)
+        if not pausa:
+            return False
+        if ahora() > pausa.pausada_hasta:
+            await session.delete(pausa)
+            await session.commit()
+            return False
+        return True
+
+
+async def reanudar_conversacion(telefono: str):
+    """Reactiva la IA para un numero inmediatamente."""
+    async with async_session() as session:
+        pausa = await session.get(ConversacionPausada, telefono)
+        if pausa:
+            await session.delete(pausa)
+            await session.commit()
+    logger.info(f"IA reactivada para {telefono}")

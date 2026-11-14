@@ -18,12 +18,15 @@ from fastapi.responses import PlainTextResponse
 
 from agent.brain import generar_respuesta, obtener_mensaje_error
 from agent.memory import (
+    esta_pausada,
     guardar_mensaje,
     inicializar_db,
     liberar_evento,
     limpiar_eventos_viejos,
     marcar_evento_procesado,
     obtener_historial,
+    pausar_conversacion,
+    reanudar_conversacion,
 )
 from agent.providers import obtener_proveedor
 from agent.providers.base import MensajeEntrante
@@ -104,6 +107,20 @@ async def health_check():
     }
 
 
+@app.post("/admin/pausar/{telefono}")
+async def admin_pausar(telefono: str, horas: int = 2):
+    """Pausa la IA para un numero. Util cuando un humano toma el control manualmente."""
+    await pausar_conversacion(telefono, horas=horas)
+    return {"status": "ok", "telefono": telefono, "pausado_por_horas": horas}
+
+
+@app.post("/admin/reanudar/{telefono}")
+async def admin_reanudar(telefono: str):
+    """Reactiva la IA para un numero inmediatamente."""
+    await reanudar_conversacion(telefono)
+    return {"status": "ok", "telefono": telefono, "estado": "reactivada"}
+
+
 @app.get("/webhook")
 async def webhook_verificacion(request: Request):
     """Verificacion GET del webhook. La pide Meta; para Zernio no hace nada."""
@@ -149,7 +166,18 @@ async def webhook_handler(request: Request, tareas: BackgroundTasks):
 
     encolados = 0
     for msg in mensajes:
-        if msg.es_propio or not msg.texto.strip():
+        if msg.es_propio:
+            # Israel respondio manualmente desde el inbox de Zernio: pausar la IA 2 horas
+            if msg.telefono:
+                await pausar_conversacion(msg.telefono, horas=2)
+            continue
+
+        if not msg.texto.strip():
+            continue
+
+        # Si un humano tomo el control, la IA no interrumpe
+        if await esta_pausada(msg.telefono):
+            logger.info(f"IA pausada para {msg.telefono}: mensaje ignorado")
             continue
 
         # La entrega es "al menos una vez": el mismo evento puede llegar dos veces
