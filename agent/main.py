@@ -9,6 +9,8 @@ Funciona con cualquier proveedor (Zernio, Meta) gracias a la capa de providers.
 import asyncio
 import logging
 import os
+import re
+import unicodedata
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -19,6 +21,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse
 
 from agent.brain import generar_respuesta, obtener_mensaje_error
 from agent.memory import (
+    desactivar_seguimiento,
     esta_pausada,
     guardar_mensaje,
     inicializar_db,
@@ -110,6 +113,57 @@ MENSAJE_SEGUIMIENTO_2 = (
     "Hola de nuevo! No quiero molestar, pero quería dejar abierta la invitación "
     "por si en algún momento quieres retomar. Seguimos disponibles 🎬"
 )
+
+# Si el cliente dice alguna de estas cosas, la conversacion quedo cerrada de su lado:
+# escribirle de nuevo tres horas despues seria insistirle a alguien que ya dijo que no.
+# Van sin tildes ni puntuacion porque se comparan contra el texto normalizado.
+_SENALES_CIERRE = [
+    "no gracias",
+    "no me interesa",
+    "no me interesan",
+    "no estoy interesado",
+    "no estoy interesada",
+    "no por ahora",
+    "por ahora no",
+    "por el momento no",
+    "mas adelante",
+    "en otro momento",
+    "otro dia",
+    "no me escriban",
+    "no me escribas",
+    "no molesten",
+    "dejen de escribir",
+    "deja de escribir",
+    "ya contrate",
+    "chao",
+    "chau",
+    "adios",
+    "hasta luego",
+    "nos vemos",
+    "eso es todo",
+    "eso seria todo",
+    "nada mas",
+    "solo eso",
+]
+
+
+def _normalizar(texto: str) -> str:
+    """Minusculas, sin tildes ni puntuacion, y con un espacio en cada borde.
+
+    Los espacios de los bordes permiten buscar frases como palabras completas:
+    " chao " no coincide dentro de otra palabra.
+    """
+    descompuesto = unicodedata.normalize("NFD", texto.lower())
+    sin_tildes = "".join(c for c in descompuesto if unicodedata.category(c) != "Mn")
+    return " " + " ".join(re.sub(r"[^a-z0-9 ]", " ", sin_tildes).split()) + " "
+
+
+def _amerita_seguimiento(mensaje_cliente: str, respuesta: str) -> bool:
+    """True si Camila dejo una pregunta abierta y el cliente no cerro la conversacion."""
+    cliente = _normalizar(mensaje_cliente)
+    if any(f" {senal} " in cliente for senal in _SENALES_CIERRE):
+        return False
+    return "?" in respuesta
 
 # Evitar notificar el mismo numero dos veces en el mismo deploy.
 # Si el agente se reinicia (nuevo deploy), puede notificar de nuevo — es aceptable.
@@ -274,6 +328,7 @@ async function reactivarTodo(){
 async def admin_pausar(telefono: str, horas: int = 2):
     """Pausa la IA para un numero. Util cuando un humano toma el control manualmente."""
     await pausar_conversacion(f"phone:{telefono}", horas=horas)
+    await desactivar_seguimiento(telefono)
     return {"status": "ok", "telefono": telefono, "pausado_por_horas": horas}
 
 
@@ -390,9 +445,27 @@ async def tarea_seguimientos():
                 continue
             pendientes = await obtener_seguimientos_pendientes(SEGUIMIENTO_HORAS_1, SEGUIMIENTO_HORAS_2)
             for seg in pendientes:
-                # No interrumpir si un humano tomo el control
+                # Si un humano tomo el control, la conversacion ya es suya: no solo se
+                # salta esta vuelta, se apaga el seguimiento. Si no, al vencer la pausa
+                # Camila escribiria encima de lo que Israel estaba conversando.
                 if await esta_pausada(seg["telefono"], seg["conversation_id"]):
+                    await desactivar_seguimiento(seg["telefono"])
                     continue
+
+                # Israel pudo haber respondido desde su app sin que el cliente volviera a
+                # escribir: en ese caso nunca se creo una pausa. Se consulta a Zernio quien
+                # mando el ultimo mensaje saliente antes de escribir.
+                if hasattr(proveedor, "detectar_control_humano"):
+                    momento_humano = await proveedor.detectar_control_humano(
+                        seg["conversation_id"], seg["account_id"]
+                    )
+                    if momento_humano is not None:
+                        logger.info(
+                            f"Seguimiento cancelado para {seg['telefono']}: "
+                            f"el ultimo mensaje saliente fue de un humano"
+                        )
+                        await desactivar_seguimiento(seg["telefono"])
+                        continue
 
                 mensaje = MENSAJE_SEGUIMIENTO_1 if seg["numero"] == 1 else MENSAJE_SEGUIMIENTO_2
                 contexto = {
@@ -503,6 +576,7 @@ async def procesar_mensaje(msg: MensajeEntrante):
                             _reactivaciones.pop("*", None)
                         # Usamos phone: (no conv:) para que /admin/reanudar y el /panel funcionen
                         await pausar_conversacion(f"phone:{msg.telefono}", horas=2)
+                        await desactivar_seguimiento(msg.telefono)
                         logger.info(
                             f"IA pausada automaticamente para {msg.telefono} "
                             f"(conv: {conversation_id}): Israel respondio desde la app de WA"
@@ -531,10 +605,13 @@ async def procesar_mensaje(msg: MensajeEntrante):
             if es_respuesta_real:
                 await guardar_mensaje(msg.telefono, "user", msg.texto)
                 await guardar_mensaje(msg.telefono, "assistant", respuesta)
-                # Registrar actividad para el seguimiento automatico.
-                # Si el prospecto no vuelve a escribir en SEGUIMIENTO_HORAS_1 horas,
-                # Camila le manda un recordatorio.
-                await registrar_actividad_cliente(msg.telefono, conversation_id, account_id)
+                # Seguimiento automatico: solo si Camila dejo una pregunta abierta y el
+                # cliente no cerro la conversacion. En cualquier otro caso se apaga el
+                # que hubiera pendiente, porque el cliente ya respondio.
+                if _amerita_seguimiento(msg.texto, respuesta):
+                    await registrar_actividad_cliente(msg.telefono, conversation_id, account_id)
+                else:
+                    await desactivar_seguimiento(msg.telefono)
 
                 # Detectar si Camila acaba de llegar al Paso 7 del flujo (lead caliente).
                 if _es_lead_caliente(respuesta):

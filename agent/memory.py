@@ -48,6 +48,19 @@ def ahora() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def en_utc(momento: datetime) -> datetime:
+    """
+    Devuelve la fecha con zona horaria UTC.
+
+    PostgreSQL devuelve las fechas con zona horaria, pero SQLite las devuelve sin ella,
+    y Python no deja comparar una fecha con zona contra una sin zona (TypeError).
+    Todo lo que se guarda sale de ahora(), asi que una fecha sin zona es UTC.
+    """
+    if momento.tzinfo is None:
+        return momento.replace(tzinfo=timezone.utc)
+    return momento
+
+
 class Base(DeclarativeBase):
     pass
 
@@ -243,7 +256,7 @@ async def esta_pausada(telefono: str, conversation_id: str = "") -> bool:
             pausa = await session.get(ConversacionPausada, clave)
             if not pausa:
                 continue
-            if ahora() > pausa.pausada_hasta:
+            if ahora() > en_utc(pausa.pausada_hasta):
                 await session.delete(pausa)
                 await session.commit()
                 continue
@@ -309,11 +322,13 @@ async def obtener_seguimientos_pendientes(horas_1: int = 3, horas_2: int = 6) ->
 
     pendientes = []
     for seg in todos:
+        ultimo_cliente = en_utc(seg.ultimo_mensaje_cliente)
+
         # Fuera de la ventana de 24 horas: no se puede mandar texto libre
-        if seg.ultimo_mensaje_cliente < limite_24h:
+        if ultimo_cliente < limite_24h:
             continue
 
-        tiempo_sin_respuesta = ahora_dt - seg.ultimo_mensaje_cliente
+        tiempo_sin_respuesta = ahora_dt - ultimo_cliente
 
         if seg.seguimientos_enviados == 0 and tiempo_sin_respuesta >= timedelta(hours=horas_1):
             pendientes.append({
@@ -323,7 +338,7 @@ async def obtener_seguimientos_pendientes(horas_1: int = 3, horas_2: int = 6) ->
                 "numero": 1,
             })
         elif seg.seguimientos_enviados == 1 and seg.ultimo_seguimiento:
-            tiempo_desde_seguimiento = ahora_dt - seg.ultimo_seguimiento
+            tiempo_desde_seguimiento = ahora_dt - en_utc(seg.ultimo_seguimiento)
             if tiempo_desde_seguimiento >= timedelta(hours=horas_2):
                 pendientes.append({
                     "telefono": seg.telefono,
@@ -344,6 +359,15 @@ async def marcar_seguimiento_enviado(telefono: str):
             seg.ultimo_seguimiento = ahora()
             if seg.seguimientos_enviados >= 2:
                 seg.activo = False
+            await session.commit()
+
+
+async def desactivar_seguimiento(telefono: str):
+    """Apaga el seguimiento de un numero: el cliente cerro la conversacion o un humano tomo el control."""
+    async with async_session() as session:
+        seg = await session.get(Seguimiento, telefono)
+        if seg and seg.activo:
+            seg.activo = False
             await session.commit()
 
 
