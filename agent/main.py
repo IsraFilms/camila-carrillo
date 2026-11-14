@@ -60,14 +60,37 @@ PORT = int(os.getenv("PORT", "8000"))
 ISRAEL_CONVERSATION_ID = os.getenv("ISRAEL_CONVERSATION_ID", "")
 ISRAEL_ACCOUNT_ID = os.getenv("ISRAEL_ACCOUNT_ID", "")
 
-# Frases que Camila dice en el Paso 7 (lead listo para cerrar).
-# Se detectan en la respuesta para disparar la notificacion.
-FRASES_ESCALACION = [
+# Detecta si Camila acaba de llegar al Paso 7 (lead caliente: pasar a Israel).
+# Claude genera frases variadas, asi que combinamos frases exactas conocidas con
+# una regla flexible: "israel" + cualquier palabra que indique traspaso o contacto.
+_FRASES_EXACTAS_ESCALACION = [
     "pasar tu contacto a israel",
+    "paso tu contacto a israel",
+    "paso tus datos a israel",
+    "datos a israel",
+    "contacto a israel",
     "coordinarlo con israel",
+    "coordinar con israel",
     "coordinar los detalles y agendar",
-    "pasar con israel",
+    "israel se va a comunicar",
+    "israel se comunicara",
+    "israel te va a",
+    "israel va a contactar",
+    "israel para que se comunique",
+    "israel para coordinar",
 ]
+_PALABRAS_TRASPASO = ["paso", "pasar", "contactar", "coordin", "comunic", "datos", "reunion", "reunión", "llamar", "hablar"]
+
+
+def _es_lead_caliente(respuesta: str) -> bool:
+    """True si Camila indica que va a pasar el prospecto a Israel (Paso 7 del flujo)."""
+    lower = respuesta.lower()
+    if any(frase in lower for frase in _FRASES_EXACTAS_ESCALACION):
+        return True
+    # Regla flexible: "israel" + cualquier palabra de traspaso en la misma respuesta
+    if "israel" in lower and any(p in lower for p in _PALABRAS_TRASPASO):
+        return True
+    return False
 
 # Evitar notificar el mismo numero dos veces en el mismo deploy.
 # Si el agente se reinicia (nuevo deploy), puede notificar de nuevo — es aceptable.
@@ -457,11 +480,7 @@ async def procesar_mensaje(msg: MensajeEntrante):
                 await guardar_mensaje(msg.telefono, "assistant", respuesta)
 
                 # Detectar si Camila acaba de llegar al Paso 7 del flujo (lead caliente).
-                # Se revisa la respuesta generada: si contiene alguna de las frases de
-                # escalacion, significa que el prospecto quiere avanzar y hay que avisar
-                # a Israel con un resumen de la conversacion.
-                respuesta_lower = respuesta.lower()
-                if any(frase in respuesta_lower for frase in FRASES_ESCALACION):
+                if _es_lead_caliente(respuesta):
                     await notificar_lead_caliente(msg.telefono, historial, msg.texto)
 
             logger.info(f"Respuesta enviada a {msg.telefono}: {respuesta}")
