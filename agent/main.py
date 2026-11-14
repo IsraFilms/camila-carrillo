@@ -11,6 +11,7 @@ import logging
 import os
 from collections import defaultdict
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
@@ -53,6 +54,15 @@ PORT = int(os.getenv("PORT", "8000"))
 # medio segundo despues la pregunta de verdad: sin esto los dos mensajes se procesarian
 # en paralelo, los dos leerian el mismo historial y las escrituras quedarian intercaladas.
 _candados: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+
+# Cuando el usuario reactiva manualmente desde el panel, guardamos el momento exacto.
+# Al detectar un mensaje humano en el historial de Zernio, comparamos su timestamp con
+# este valor: si la reactivacion es mas reciente que el mensaje de Israel, lo ignoramos
+# y no volvemos a pausar. Se resetea solo cuando llega un mensaje humano MAS NUEVO.
+# Clave "*" = reactivacion global (boton "Reactivar TODAS").
+# Se pierde en cada redespliegue — es intencional: si Railway reinicia, el agente arranca
+# limpio y detecta el estado real desde Zernio.
+_reactivaciones: dict[str, datetime] = {}
 
 # Si la configuracion esta mal, guardamos el error y lo mostramos en el health check,
 # en vez de reventar en el import y dejar a Railway reiniciando el contenedor a ciegas.
@@ -203,6 +213,11 @@ async def admin_pausar(telefono: str, horas: int = 2):
 async def admin_reanudar(telefono: str):
     """Reactiva la IA para un numero inmediatamente."""
     await reanudar_conversacion(f"phone:{telefono}")
+    # Guardamos CUANDO se reactivo: si detectar_control_humano encuentra el mensaje de
+    # Israel en el historial, comparamos su timestamp con este — si la reactivacion es
+    # mas reciente, ignoramos la deteccion y no volvemos a pausar.
+    _reactivaciones[telefono] = datetime.now(timezone.utc)
+    logger.info(f"Reactivacion manual registrada para {telefono}")
     return {"status": "ok", "telefono": telefono, "estado": "reactivada"}
 
 
@@ -210,6 +225,9 @@ async def admin_reanudar(telefono: str):
 async def admin_reanudar_todo():
     """Elimina TODAS las pausas activas. Reactiva la IA para todos los clientes."""
     eliminadas = await limpiar_todas_las_pausas()
+    # El comodin "*" aplica a cualquier telefono que no tenga reactivacion propia.
+    _reactivaciones["*"] = datetime.now(timezone.utc)
+    logger.info("Reactivacion global registrada (todos los telefonos)")
     return {"status": "ok", "pausas_eliminadas": eliminadas}
 
 
@@ -311,14 +329,31 @@ async def procesar_mensaje(msg: MensajeEntrante):
             # afecta el SLA del webhook.
             account_id = msg.contexto.get("account_id", "")
             if conversation_id and hasattr(proveedor, "detectar_control_humano"):
-                if await proveedor.detectar_control_humano(conversation_id, account_id):
-                    # Usamos phone: (no conv:) para que /admin/reanudar y el /panel funcionen
-                    await pausar_conversacion(f"phone:{msg.telefono}", horas=2)
-                    logger.info(
-                        f"IA pausada automaticamente para {msg.telefono} "
-                        f"(conv: {conversation_id}): Israel respondio desde la app de WA"
-                    )
-                    return
+                momento_humano = await proveedor.detectar_control_humano(conversation_id, account_id)
+                if momento_humano is not None:
+                    # Hay un mensaje humano en el historial. Verificamos si hubo una
+                    # reactivacion manual MAS RECIENTE que ese mensaje.
+                    reactivada_en = _reactivaciones.get(msg.telefono) or _reactivaciones.get("*")
+                    if reactivada_en and reactivada_en > momento_humano:
+                        # El usuario ya reactivo despues de ese mensaje → ignorar deteccion.
+                        logger.info(
+                            f"Reactivacion manual ({reactivada_en.strftime('%H:%M:%S')} UTC) "
+                            f"mas reciente que mensaje humano ({momento_humano.strftime('%H:%M:%S')} UTC): "
+                            f"ignorando deteccion para {msg.telefono}"
+                        )
+                    else:
+                        # El mensaje humano es mas nuevo que la ultima reactivacion → pausar.
+                        # Limpiamos la reactivacion vieja para que no afecte otras detecciones.
+                        _reactivaciones.pop(msg.telefono, None)
+                        if reactivada_en:
+                            _reactivaciones.pop("*", None)
+                        # Usamos phone: (no conv:) para que /admin/reanudar y el /panel funcionen
+                        await pausar_conversacion(f"phone:{msg.telefono}", horas=2)
+                        logger.info(
+                            f"IA pausada automaticamente para {msg.telefono} "
+                            f"(conv: {conversation_id}): Israel respondio desde la app de WA"
+                        )
+                        return
 
             # El historial se lee ANTES de guardar el mensaje actual: brain.py agrega
             # el mensaje nuevo al final, y asi no queda duplicado.
