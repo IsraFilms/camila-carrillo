@@ -1,0 +1,27 @@
+# Configuración del negocio — Generado por AgentKit
+negocio:
+  nombre: "Carrillo Audiovisual"
+  descripcion: >
+    Productora audiovisual ubicada en Antofagasta, Chile. Se especializa en crear
+    contenido profesional para negocios y emprendimientos que quieren crecer en
+    redes sociales. Clientes: pymes y emprendedores locales de salud y bienestar,
+    gastronomía, estética, servicios profesionales y comercio en general.
+  horario: "Lunes a Sábado, 9:00 a 20:00 hrs"
+  web: "carrilloav.cl"
+  whatsapp: "+56 9 7704 9810"
+  instagram: "@carrilloav.cl"
+  ciudad: "Antofagasta, Chile"
+
+agente:
+  nombre: "Camila Vilches"
+  tono: "amigable, persuasivo y empático"
+  casos_de_uso:
+    - "Responder preguntas frecuentes"
+    - "Calificar y atender leads de ventas"
+    - "Agendar reuniones con Israel cuando el lead está listo"
+  escalar_a: "Israel"
+
+metadata:
+  creado: "2026-11-13"
+  proveedor: "zernio"
+  version: "2.0"
