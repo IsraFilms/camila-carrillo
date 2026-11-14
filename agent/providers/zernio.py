@@ -174,6 +174,74 @@ class ProveedorZernio(ProveedorWhatsApp):
         logger.error(f"Zernio rechazo el envio [{r.status_code}]: {detalle}")
         return False
 
+    # ── Deteccion de control humano ──────────────────────────────────────
+
+    async def detectar_control_humano(self, conversation_id: str) -> bool:
+        """
+        Consulta los mensajes recientes de la conversacion y detecta si el ultimo
+        mensaje SALIENTE fue enviado desde la app de WhatsApp Business (sentVia: null)
+        en lugar de via API (sentVia: "api").
+
+        Retorna True si Israel respondio desde su celular → la IA debe pausarse.
+        Retorna False si Camila fue la ultima en responder, o si no hay mensajes salientes,
+        o si la consulta falla (en ese caso, es mejor no pausar que bloquear al agente).
+
+        Por que sentVia:
+          "api"  → Camila respondio via la API de Zernio (normal)
+          null   → mensaje enviado desde la app nativa de WhatsApp Business
+                   (Israel respondio desde su celular)
+        """
+        if not self.api_key or not conversation_id:
+            return False
+
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as cliente:
+                r = await cliente.get(
+                    f"{self.base_url}/inbox/conversations/{conversation_id}/messages",
+                    params={"sortOrder": "desc", "limit": "10"},
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                )
+        except httpx.HTTPError as e:
+            logger.warning(f"No se pudo consultar historial de conv {conversation_id}: {e}")
+            return False
+
+        if r.status_code != 200:
+            logger.warning(
+                f"Zernio respondio {r.status_code} al consultar historial "
+                f"de conv {conversation_id}: {r.text[:200]}"
+            )
+            return False
+
+        try:
+            body = r.json()
+        except ValueError:
+            return False
+
+        # Zernio puede traer los mensajes en "data" o "messages"
+        mensajes = body.get("data") or body.get("messages") or []
+
+        for msg in mensajes:
+            if msg.get("direction") != "outgoing":
+                continue
+
+            sent_via = msg.get("sentVia")
+
+            if sent_via is None:
+                # Mensaje saliente enviado desde la app de WhatsApp Business de Israel
+                logger.info(
+                    f"Control humano detectado (sentVia=null) en conv {conversation_id}"
+                )
+                return True
+
+            if sent_via == "api":
+                # Camila fue la ultima en responder — continuar normalmente
+                return False
+
+            # "broadcast", "sequence", "workflow", etc. son envios automatizados de
+            # Zernio, no de un humano. Los saltamos y seguimos buscando.
+
+        return False
+
     # ── Diagnostico ──────────────────────────────────────────────────────
 
     async def verificar_conexion(self) -> tuple[bool, str]:

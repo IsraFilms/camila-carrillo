@@ -282,9 +282,24 @@ async def procesar_mensaje(msg: MensajeEntrante):
     atienden en orden, no en paralelo, para que el historial no se mezcle.
     """
     evento_id = msg.contexto.get("evento_id") or msg.mensaje_id
+    conversation_id = msg.contexto.get("conversation_id", "")
 
     async with _candados[msg.telefono]:
         try:
+            # Deteccion automatica: si Israel respondio desde su app de WhatsApp Business,
+            # la IA se pausa sola. Se consulta el historial de Zernio y se revisa el
+            # sentVia del ultimo mensaje saliente. Si es null = app nativa = humano al mando.
+            # Esto corre en background (ya respondimos 200), asi que el tiempo extra no
+            # afecta el SLA del webhook.
+            if conversation_id and hasattr(proveedor, "detectar_control_humano"):
+                if await proveedor.detectar_control_humano(conversation_id):
+                    await pausar_conversacion(f"conv:{conversation_id}", horas=2)
+                    logger.info(
+                        f"IA pausada automaticamente para {msg.telefono} "
+                        f"(conv: {conversation_id}): Israel respondio desde la app de WA"
+                    )
+                    return
+
             # El historial se lee ANTES de guardar el mensaje actual: brain.py agrega
             # el mensaje nuevo al final, y asi no queda duplicado.
             historial = await obtener_historial(msg.telefono)
